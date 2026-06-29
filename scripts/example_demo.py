@@ -69,11 +69,21 @@ class GenCtx():
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = func_from_pretrained(model_path, device_map=self.device, torch_dtype=self.dtype)
         if self.ctx_id == "Quest":
-            # Setup the Quest Controller
             self.model.quest_init(page_size=16, max_seq_len=32768, token_budget=2048, device=self.device)
         elif self.ctx_id == "FlashInfer":
-            # Setup the Quest Controller
             self.model.quest_init(page_size=16, max_seq_len=32768, token_budget=32768, device=self.device)
+        elif self.ctx_id == "Quest-MPR":
+            # MPR mode: keep 512 pages on GPU, offload the rest to CPU.
+            self.model.quest_mpr_init(
+                page_size=16,
+                gpu_capacity=512,       # ~8k tokens resident on GPU
+                max_seq_len=32768,
+                token_budget=2048,
+                tier_high=10.0,
+                tier_mid=3.0,
+                tier_low=0.5,
+                device=self.device,
+            )
         
         self.output_ids = self.tokenizer.encode(prompt)
         self.prompt_len = len(self.output_ids)
@@ -288,8 +298,22 @@ FlashSpec = InferSpec(
     ctx_id="FlashInfer",
 )
 
+QuestMPRSpec = InferSpec(
+    model_path="/mnt/storage/models/longchat-7b-v1.5-32k",
+    device="cuda:0",
+    temperature=1.0,
+    repetition_penalty=1.1,
+    func_from_pretrained=quest.LlamaForCausalLM.from_pretrained,
+    top_p=0.9,
+    top_k=-1,
+    maxlen=32768,
+    stop_token_id=2,
+    ctx_id="Quest-MPR",
+)
+
 DemoSpec = [
     QuestSpec,
+    # QuestMPRSpec,
     # FlashSpec,
 ]
 

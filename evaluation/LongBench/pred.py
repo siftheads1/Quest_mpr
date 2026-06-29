@@ -45,6 +45,18 @@ def parse_args(args=None):
     parser.add_argument("--chunk_size", type=int, default=None)
     parser.add_argument("--quest", action="store_true", help="Enable Quest Attention")
 
+    # MPR options
+    parser.add_argument("--use_mpr", action="store_true",
+                        help="Enable MPR (Mixed-Precision Recovery) mode.")
+    parser.add_argument("--gpu_capacity", type=int, default=None,
+                        help="GPU page capacity for MPR (pages).")
+    parser.add_argument("--tier_high", type=float, default=10.0,
+                        help="FP16 recall score threshold (MPR).")
+    parser.add_argument("--tier_mid", type=float, default=3.0,
+                        help="INT8 recall score threshold (MPR).")
+    parser.add_argument("--tier_low", type=float, default=0.5,
+                        help="INT4 recall score threshold (MPR).")
+
     return parser.parse_args(args)
 
 
@@ -233,11 +245,37 @@ def seed_everything(seed):
 
 
 def load_model_and_tokenizer(path, model_name, device):
+    if args.use_mpr:
+        # MPR path: use Quest's LlamaForCausalLM with quest_mpr_init.
+        from quest import LlamaForCausalLM as QuestLlamaForCausalLM
+
+        tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+        model = QuestLlamaForCausalLM.from_pretrained(
+            path, device_map=device, torch_dtype=torch.float16
+        )
+        page_size = args.chunk_size or 16
+        token_budget = args.token_budget or 512
+        max_seq = 32768
+        gpu_capacity = args.gpu_capacity or (max_seq // page_size)
+        model.quest_mpr_init(
+            page_size=page_size,
+            gpu_capacity=gpu_capacity,
+            max_seq_len=max_seq,
+            token_budget=token_budget,
+            tier_high=args.tier_high,
+            tier_mid=args.tier_mid,
+            tier_low=args.tier_low,
+            dtype=torch.float16,
+            device=torch.device(device),
+        )
+        model = model.eval()
+        return model, tokenizer
+
     if 'llama' in model_name.lower() or 'longchat' in model_name.lower():
         enable_tuple_kv_cache_for_llama()
     if 'mistral' in model_name.lower():
         enable_tuple_kv_cache_for_mistral()
-        
+
     tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         path, trust_remote_code=True, torch_dtype=torch.bfloat16, device_map="auto"

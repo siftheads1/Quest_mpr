@@ -2,16 +2,23 @@ import torch
 import math
 from typing import Optional
 
-import quest._kernels as _kernels
+try:
+    import quest._kernels as _kernels
+    _KERNELS_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    _kernels = None  # type: ignore[assignment]
+    _KERNELS_AVAILABLE = False
 from quest.utils.utils import TensorLayout
 from quest.utils.kv_cache import KvCache
 from quest.utils.controller import InferenceController
+from quest.utils.mpr_controller import MPRController
 from quest.utils.decode_wrapper import BatchDecodeWithPagedKVCacheWrapper
 
 __all__ = [
     'TensorLayout',
     'KvCache',
     'InferenceController',
+    'MPRController',
     "BatchDecodeWithPagedKVCacheWrapper",
     "append_kv",
     "prefill_forward",
@@ -21,6 +28,14 @@ __all__ = [
     "rms_norm_forward",
     "apply_rope_in_place",
 ]
+
+def _require_kernels(fn_name: str):
+    if not _KERNELS_AVAILABLE:
+        raise RuntimeError(
+            f"{fn_name} requires quest._kernels (compiled CUDA extension). "
+            "Build the extension first: cd Quest_mpr && pip install -e ."
+        )
+
 
 def apply_rope_in_place(
     q: torch.Tensor,
@@ -39,6 +54,7 @@ def apply_rope_in_place(
         k: Shape: `[N, H, D]`. 
         past_kv_len: Length of past KV cache. Used to calculate frequency.
     """
+    _require_kernels("apply_rope_in_place")
     if rope_scale is None:
         rope_scale = 1.0
     if rope_theta is None:
@@ -56,6 +72,7 @@ def rms_norm_forward(
     weight: torch.Tensor,
     epsilon: float,
 ) -> torch.Tensor:
+    _require_kernels("rms_norm_forward")
     o = torch.empty_like(input, dtype=input.dtype, device=input.device)
     f = _kernels.rms_norm_forward
     f(
@@ -90,6 +107,7 @@ def append_kv(
         iController: InferenceController object, which contains all needed information.
         layer_idx: Layer index of the KV cache.
     """
+    _require_kernels("append_kv")
     seq_len = k.size(0)
     if seq_len > 1:
         _kernels.append_kv_cache_prefill(
@@ -149,6 +167,7 @@ def prefill_forward(
         iController: InferenceController object, which contains all needed information.
         layer_idx: Layer index of the KV cache.
     """
+    _require_kernels("prefill_forward")
     if rope_scale is None:
         rope_scale = 1.0
     if rope_theta is None:
@@ -189,6 +208,7 @@ def decode_estimate(
         iController: InferenceController object, which contains all needed information.
         layer_idx: Layer index of the KV cache.
     """
+    _require_kernels("decode_estimate")
     f = _kernels.estimate_attn_score
     # (iController.metadata_cache.seqlen - 1) is manually excluding the last elements, which is the current page.
     o = torch.empty((iController.num_heads, iController.metadata_cache.seqlen - 1), dtype=q.dtype, device=q.device)
@@ -224,6 +244,7 @@ def decode_topk(
         iController: InferenceController object, which contains all needed information.
         layer_idx: Layer index of the KV cache.
     """
+    _require_kernels("decode_topk")
     # excluding the last page
     page_budet = iController.inference_page_budget - 1
     f = _kernels.topk_filtering
@@ -261,6 +282,7 @@ def decode_sparse_attn(
         layer_idx: Layer index of the KV cache.
         topk_indices: Shape: `[N, page_budget-1]`. Top-k indices.
     """
+    _require_kernels("decode_sparse_attn")
     o = torch.empty_like(q, dtype=q.dtype, device=q.device)
     iController._decode_handler.forward(
         q,

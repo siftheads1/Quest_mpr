@@ -10,6 +10,7 @@ from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, apply_rotary_pos_emb, repeat_kv
 
 import quest.utils
+from quest.utils.mpr_controller import MPRController
 
 class QuestAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
@@ -120,8 +121,56 @@ class QuestAttention(nn.Module):
                 self.layer_idx,
             )
             torch.cuda.nvtx.range_pop()
+        elif isinstance(iController, MPRController):
+            # MPR decode path: score all blocks (GPU+CPU via metadata_cache),
+            # recall needed CPU blocks, attend only GPU-resident blocks.
+            if iController.need_estimate() == False:
+                torch.cuda.nvtx.range_push("mpr_full_attn")
+                attn_output = quest.utils.decode_sparse_attn(
+                    query_states,
+                    iController,
+                    self.layer_idx,
+                    iController.kv_indices_without_last,
+                )
+                torch.cuda.nvtx.range_pop()
+            else:
+                torch.cuda.nvtx.range_push("mpr_estimate")
+                estimated_attn_score = quest.utils.decode_estimate(
+                    query_states,
+                    iController,
+                    self.layer_idx,
+                )
+                torch.cuda.nvtx.range_pop()
+
+                torch.cuda.nvtx.range_push("mpr_select")
+                gpu_indices = iController.mpr_step_select(
+                    estimated_attn_score,
+                    self.layer_idx,
+                )
+                torch.cuda.nvtx.range_pop()
+
+                torch.cuda.nvtx.range_push("mpr_attn")
+                if gpu_indices.shape[1] == 0:
+                    # No historical pages selected; attend current page only.
+                    # FlashInfer requires at least one page, so we fall back to
+                    # a single-page view of the current page.
+                    attn_output = quest.utils.decode_sparse_attn(
+                        query_states,
+                        iController,
+                        self.layer_idx,
+                        iController.kv_indices_without_last[:, :0],
+                    )
+                else:
+                    attn_output = quest.utils.decode_sparse_attn(
+                        query_states,
+                        iController,
+                        self.layer_idx,
+                        gpu_indices,
+                    )
+                torch.cuda.nvtx.range_pop()
         else:
-            # Skipping layers is controled by PAGE_BUDGET, which is set in LlamaModel.
+            # Original Quest decode path (no CPU offloading).
+            # Skipping layers is controlled by PAGE_BUDGET, which is set in LlamaModel.
             if iController.need_estimate() == False:
                 torch.cuda.nvtx.range_push("full_attn")
                 attn_output = quest.utils.decode_sparse_attn(

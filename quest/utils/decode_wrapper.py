@@ -1,7 +1,12 @@
 import torch
 from typing import Optional
 
-import quest._kernels as _kernels
+try:
+    import quest._kernels as _kernels
+    _KERNELS_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    _kernels = None  # type: ignore[assignment]
+    _KERNELS_AVAILABLE = False
 from quest.utils.utils import TensorLayout
 
 def _check_kv_layout(kv_layout: str):
@@ -20,6 +25,9 @@ class BatchDecodeWithPagedKVCacheWrapper:
     def __init__(self, kv_layout: str = "NHD"):
         _check_kv_layout(kv_layout)
         self.kv_layout = kv_layout
+        if not _KERNELS_AVAILABLE:
+            self._wrapper = None
+            return
         self._wrapper = _kernels.BatchDecodeWithPagedKVCachePyTorchWrapper(
             getattr(TensorLayout, kv_layout)
         )

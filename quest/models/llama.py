@@ -530,13 +530,13 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         This function allocates all GPU memory for max_seq_len KV-Cache.
         """
         assert self.model.iController is None, "Can't init Quest Controller twice."
-        
+
         config = self._config
         self.model._quest_page_size = page_size
         self.model._quest_page_budget = token_budget // page_size # default page budget
         self.model._quest_max_page_limit = 1024*1024 # arbitraty large size
         self.model._quest_skip_layer = 2
-        
+
         self.model.iController = InferenceController(
             num_layers=config.num_hidden_layers,
             num_heads=config.num_attention_heads,
@@ -547,9 +547,67 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             dtype=dtype,
             device=device
         )
-        
+
         print(f"Quest allocates KV-Cache of {max_seq_len} tokens")
         print(f"Token budget is set to {token_budget}")
+
+    def quest_mpr_init(
+        self,
+        page_size: int,
+        gpu_capacity: int,
+        max_seq_len: int,
+        token_budget: int = 512,
+        tier_high: float = 10.0,
+        tier_mid: float = 3.0,
+        tier_low: float = 0.5,
+        dtype: torch.dtype = torch.float16,
+        device = torch.device("cuda:0"),
+    ):
+        """Init Quest with MPR (Mixed-Precision Recovery) CPU offloading.
+
+        Args:
+            page_size: Tokens per KV page.
+            gpu_capacity: Maximum number of KV pages to keep on GPU simultaneously.
+                          Blocks exceeding this are evicted to CPU.
+            max_seq_len: Maximum sequence length (sets metadata_cache size).
+            token_budget: Attention budget in tokens (top-k selection).
+            tier_high: Score threshold for FP16 recall.
+            tier_mid:  Score threshold for INT8 recall.
+            tier_low:  Score threshold for INT4 recall (below → skip).
+            dtype: KV cache data type.
+            device: CUDA device.
+        """
+        from quest.utils.mpr_controller import MPRController
+
+        assert self.model.iController is None, "Can't init Quest Controller twice."
+
+        config = self._config
+        self.model._quest_page_size = page_size
+        self.model._quest_page_budget = token_budget // page_size
+        self.model._quest_max_page_limit = 1024 * 1024
+        self.model._quest_skip_layer = 2
+
+        self.model.iController = MPRController(
+            num_layers=config.num_hidden_layers,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
+            head_dim=config.hidden_size // config.num_attention_heads,
+            page_size=page_size,
+            page_budget=self.model._quest_page_budget,
+            gpu_capacity=gpu_capacity,
+            max_seq_len=max_seq_len,
+            tier_high=tier_high,
+            tier_mid=tier_mid,
+            tier_low=tier_low,
+            dtype=dtype,
+            device=device,
+        )
+
+        print(f"Quest-MPR: gpu_capacity={gpu_capacity} pages "
+              f"({gpu_capacity * page_size} tokens on GPU)")
+        print(f"Quest-MPR: max_seq_len={max_seq_len}, token_budget={token_budget}")
+        print(f"Quest-MPR: tier thresholds fp16>={tier_high}, "
+              f"int8>={tier_mid}, int4>={tier_low}")
     
     def quest_clear(self):
         """
